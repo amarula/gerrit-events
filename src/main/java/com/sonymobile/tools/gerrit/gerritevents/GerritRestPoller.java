@@ -28,8 +28,10 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -60,6 +62,7 @@ import com.sonymobile.tools.gerrit.gerritevents.dto.events.ChangeAbandoned;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.ChangeMerged;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.GerritTriggeredEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.PatchsetCreated;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
 
 /**
  * Polls the Gerrit REST API over HTTPS to receive change events.
@@ -126,25 +129,26 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
     private final Map<String, ChangeState> knownChanges = new ConcurrentHashMap<String, ChangeState>();
 
     /**
-     * Stores the last known revision and status for a change.
-     */
-    /**
-     * Stores the last known revision and status for a change.
+     * Stores the last known state for a change.
      */
     private static class ChangeState {
         /** The last known revision. */
         final String revision;
         /** The last known status. */
         final GerritChangeStatus status;
+        /** The last known topic, or null. */
+        final String topic;
 
         /**
          * Creates a new ChangeState.
          * @param revision the revision.
          * @param status the status.
+         * @param topic the topic, or null.
          */
-        ChangeState(String revision, GerritChangeStatus status) {
+        ChangeState(String revision, GerritChangeStatus status, String topic) {
             this.revision = revision;
             this.status = status;
+            this.topic = topic;
         }
     }
 
@@ -370,7 +374,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      */
     private void pollChanges() throws IOException {
         String queryPath = "a/changes/?q=is:open&n=" + maxChangesPerPoll
-                + "&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT";
+                + "&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT&o=HASHTAGS";
         String body = httpGet(queryPath);
         JSONArray changes;
         try {
@@ -501,8 +505,82 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             }
         }
 
+        // Check for topic changes on known changes
+        if (previous != null && !isNew && !revisionChanged) {
+            detectTopicChange(changeJson, previous, provider,
+                    currentRevObj, currentRevision, changeId, project, branch,
+                    subject, changeNumber, changeStatus);
+        }
+
+        // Extract current topic from the REST response for state tracking
+        String currentTopic = changeJson.optString("topic", null);
+        if (currentTopic != null && currentTopic.isEmpty()) {
+            currentTopic = null;
+        }
+
         // Update known state
-        knownChanges.put(changeId, new ChangeState(currentRevision, changeStatus));
+        knownChanges.put(changeId, new ChangeState(currentRevision, changeStatus,
+                currentTopic));
+    }
+
+    /**
+     * Detects topic changes for a known change and emits a
+     * {@link TopicChanged} event when the topic changes.
+     *
+     * @param changeJson the REST API JSON for the change.
+     * @param previous the previous known state.
+     * @param provider the Provider to attach.
+     * @param currentRevObj the current revision JSON.
+     * @param currentRevision the current revision SHA.
+     * @param changeId the change ID.
+     * @param project the project name.
+     * @param branch the branch name.
+     * @param subject the change subject.
+     * @param changeNumber the change number.
+     * @param changeStatus the current status.
+     */
+    private void detectTopicChange(JSONObject changeJson, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision,
+            String changeId, String project, String branch, String subject,
+            String changeNumber, GerritChangeStatus changeStatus) {
+
+        String currentTopic = changeJson.optString("topic", null);
+        if (currentTopic != null && currentTopic.isEmpty()) {
+            currentTopic = null;
+        }
+        String previousTopic = previous.topic;
+
+        //CS IGNORE AvoidInlineConditionals FOR NEXT 2 LINES. REASON: Readable null-safe.
+        boolean topicChanged = (previousTopic == null)
+                ? (currentTopic != null) : !previousTopic.equals(currentTopic);
+        if (topicChanged) {
+            Change change = buildChange(changeJson, changeId, project, branch, subject,
+                    changeNumber, changeStatus);
+            PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
+
+            TopicChanged topicEvent = new TopicChanged();
+            topicEvent.setChange(change);
+            topicEvent.setPatchset(patchSet);
+            topicEvent.setProvider(provider);
+            topicEvent.setReceivedOn(System.currentTimeMillis());
+            if (previousTopic != null) {
+                topicEvent.setOldTopic(previousTopic);
+            }
+            if (changeJson.has("owner")) {
+                try {
+                    topicEvent.setChanger(new Account(changeJson.getJSONObject("owner")));
+                    topicEvent.setAccount(new Account(changeJson.getJSONObject("owner")));
+                } catch (Exception ex) {
+                    logger.trace("{}: Could not parse changer for topic change: {}",
+                            gerritName, ex.getMessage());
+                }
+            }
+            if (handler != null) {
+                handler.post(topicEvent);
+                logger.info("{}: Posted TopicChanged for change {}/{}: {} -> {}",
+                        gerritName, project, changeNumber, previousTopic, currentTopic);
+            }
+        }
     }
 
     /**
@@ -535,6 +613,21 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         // Set URL
         String url = frontEndUrl + changeNumber;
         change.setUrl(url);
+        // Set topic if present
+        if (changeJson.has("topic")) {
+            change.setTopic(changeJson.getString("topic"));
+        }
+        // Set hashtags if present
+        if (changeJson.has("hashtags")) {
+            JSONArray tags = changeJson.getJSONArray("hashtags");
+            List<String> hashtagList = new ArrayList<String>(tags.size());
+            for (int j = 0; j < tags.size(); j++) {
+                hashtagList.add(tags.getString(j));
+            }
+            change.setHashtags(hashtagList);
+        } else {
+            change.setHashtags(Collections.<String>emptyList());
+        }
         return change;
     }
 

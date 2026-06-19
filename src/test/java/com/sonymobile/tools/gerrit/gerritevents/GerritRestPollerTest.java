@@ -30,13 +30,19 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
+
+import net.sf.json.JSONObject;
 
 import org.apache.http.auth.Credentials;
 import org.apache.http.auth.UsernamePasswordCredentials;
 
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
+import com.sonymobile.tools.gerrit.gerritevents.dto.attr.Provider;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
 import com.sonymobile.tools.gerrit.gerritevents.ssh.Authentication;
 import com.sonymobile.tools.gerrit.gerritevents.watchdog.WatchTimeExceptionData;
 
@@ -44,7 +50,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-//CS IGNORE MagicNumber FOR NEXT 400 LINES. REASON: TestData
+//CS IGNORE MagicNumber FOR NEXT 600 LINES. REASON: TestData
 
 /**
  * Tests for {@link GerritRestPoller}.
@@ -121,13 +127,15 @@ public class GerritRestPollerTest {
     }
 
     /**
-     * A handler mock that counts posted events.
+     * A handler mock that counts and captures posted events.
      */
     static class HandlerMock extends GerritHandler {
         /** Latch counted down when an event is received. */
         final CountDownLatch eventLatch;
         /** Number of events received. */
         volatile int eventCount;
+        /** Captured events for later verification. */
+        final List<GerritEvent> capturedEvents = new ArrayList<GerritEvent>();
 
         /**
          * Creates a new HandlerMock.
@@ -140,9 +148,18 @@ public class GerritRestPollerTest {
         @Override
         public void post(GerritEvent event) {
             eventCount++;
+            capturedEvents.add(event);
             if (eventLatch != null) {
                 eventLatch.countDown();
             }
+        }
+
+        /**
+         * Resets captured events.
+         */
+        void reset() {
+            capturedEvents.clear();
+            eventCount = 0;
         }
     }
 
@@ -336,5 +353,175 @@ public class GerritRestPollerTest {
     @Test
     public void testIsConnectedInitiallyFalse() {
         assertFalse(poller.isConnected());
+    }
+
+    // ---- Topic change detection tests ----
+
+    /**
+     * Builds a minimal REST API JSON change object for testing.
+     * @param changeId the change ID.
+     * @param project the project name.
+     * @param branch the branch name.
+     * @param changeNumber the change number.
+     * @param subject the change subject.
+     * @param status the change status.
+     * @param revision the current revision SHA.
+     * @param topic the topic, or null.
+     * @return a JSON object representing a REST API change.
+     */
+    private JSONObject buildRestChangeJson(String changeId, String project, String branch,
+            int changeNumber, String subject, String status, String revision,
+            String topic) {
+        JSONObject json = new JSONObject();
+        json.put("id", changeId);
+        json.put("project", project);
+        json.put("branch", branch);
+        json.put("_number", changeNumber);
+        json.put("subject", subject);
+        json.put("status", status);
+        json.put("current_revision", revision);
+        if (topic != null) {
+            json.put("topic", topic);
+        }
+        JSONObject owner = new JSONObject();
+        owner.put("name", "Test User");
+        owner.put("email", "user@example.com");
+        json.put("owner", owner);
+
+        JSONObject revisions = new JSONObject();
+        JSONObject revObj = new JSONObject();
+        revObj.put("_number", 1);
+        revObj.put("ref", "refs/changes/" + changeNumber + "/1");
+        revObj.put("kind", "REWORK");
+        revisions.put(revision, revObj);
+        json.put("revisions", revisions);
+        return json;
+    }
+
+    /**
+     * Creates a standard Provider for test events.
+     * @return a Provider with test values.
+     */
+    private Provider createTestProvider() {
+        return new Provider("testServer", "gerrit.example.com", "29418", "https",
+                "https://gerrit.example.com/", "3.6.0");
+    }
+
+    /**
+     * Tests detection of topic change from null to a value.
+     */
+    @Test
+    public void testTopicChangeNullToValue() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~I001";
+
+        // First call establishes known state (no topic)
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 1,
+                "Test", "NEW", "rev1", null);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+
+        // Should get 1 PatchsetCreated, no topic event
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        // Second call: topic added
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 1,
+                "Test", "NEW", "rev1", "new-topic");
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        // Should get 1 TopicChanged (no PatchsetCreated since revision didn't change)
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected TopicChanged but got " + event.getClass().getSimpleName(),
+                event instanceof TopicChanged);
+        TopicChanged tc = (TopicChanged)event;
+        assertNull(tc.getOldTopic());
+        assertEquals("new-topic", tc.getChange().getTopic());
+    }
+
+    /**
+     * Tests detection of topic change from one value to another.
+     */
+    @Test
+    public void testTopicChangeValueToValue() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~I002";
+
+        // First call with topic "old-topic"
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 2,
+                "Test", "NEW", "rev1", "old-topic");
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        // Second call: topic changed
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 2,
+                "Test", "NEW", "rev1", "new-topic");
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected TopicChanged but got " + event.getClass().getSimpleName(),
+                event instanceof TopicChanged);
+        TopicChanged tc = (TopicChanged)event;
+        assertEquals("old-topic", tc.getOldTopic());
+        assertEquals("new-topic", tc.getChange().getTopic());
+    }
+
+    /**
+     * Tests detection of topic removal (value to null).
+     */
+    @Test
+    public void testTopicChangeValueToNull() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~I003";
+
+        // First call with topic "my-topic"
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 3,
+                "Test", "NEW", "rev1", "my-topic");
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        // Second call: topic removed (null)
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 3,
+                "Test", "NEW", "rev1", null);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected TopicChanged but got " + event.getClass().getSimpleName(),
+                event instanceof TopicChanged);
+        TopicChanged tc = (TopicChanged)event;
+        assertEquals("my-topic", tc.getOldTopic());
+        assertNull(tc.getChange().getTopic());
+    }
+
+    /**
+     * Tests that a new change does not emit TopicChanged
+     * even when it has a topic set.
+     */
+    @Test
+    public void testNewChangeWithTopic() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~I005";
+
+        JSONObject json = buildRestChangeJson(changeId, "proj", "master", 5,
+                "Test", "NEW", "rev1", "my-topic");
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", json, provider);
+
+        // Should get exactly 1 PatchsetCreated, no TopicChanged
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertFalse("New change should not emit TopicChanged",
+                event instanceof TopicChanged);
     }
 }
