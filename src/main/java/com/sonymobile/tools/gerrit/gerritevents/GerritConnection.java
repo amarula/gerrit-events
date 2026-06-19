@@ -56,7 +56,7 @@ import com.sonymobile.tools.gerrit.gerritevents.watchdog.WatchTimeExceptionData;
  *
  * @author rinrinne &lt;rinrin.ne@gmail.com&gt;
  */
-public class GerritConnection extends Thread implements Connector {
+public class GerritConnection extends Thread implements Connector, GerritEventSource {
 
     /**
      * Time to wait between connection attempts.
