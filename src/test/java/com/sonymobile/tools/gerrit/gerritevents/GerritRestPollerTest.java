@@ -43,6 +43,7 @@ import org.apache.http.auth.UsernamePasswordCredentials;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.attr.Provider;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.WipStateChanged;
 import com.sonymobile.tools.gerrit.gerritevents.ssh.Authentication;
 import com.sonymobile.tools.gerrit.gerritevents.watchdog.WatchTimeExceptionData;
 
@@ -372,6 +373,13 @@ public class GerritRestPollerTest {
     private JSONObject buildRestChangeJson(String changeId, String project, String branch,
             int changeNumber, String subject, String status, String revision,
             String topic) {
+        return buildRestChangeJson(changeId, project, branch, changeNumber, subject, status,
+                revision, topic, false);
+    }
+
+    private JSONObject buildRestChangeJson(String changeId, String project, String branch,
+            int changeNumber, String subject, String status, String revision,
+            String topic, boolean wip) {
         JSONObject json = new JSONObject();
         json.put("id", changeId);
         json.put("project", project);
@@ -380,6 +388,7 @@ public class GerritRestPollerTest {
         json.put("subject", subject);
         json.put("status", status);
         json.put("current_revision", revision);
+        json.put("work_in_progress", wip);
         if (topic != null) {
             json.put("topic", topic);
         }
@@ -523,5 +532,55 @@ public class GerritRestPollerTest {
         GerritEvent event = handlerMock.capturedEvents.get(0);
         assertFalse("New change should not emit TopicChanged",
                 event instanceof TopicChanged);
+    }
+
+    // ---- WIP state change detection tests ----
+
+    @Test
+    public void testWipStateChangeToTrue() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~Iwip1";
+
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 10,
+                "Test", "NEW", "rev1", null, false);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 10,
+                "Test", "NEW", "rev1", null, true);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected WipStateChanged but got " + event.getClass().getSimpleName(),
+                event instanceof WipStateChanged);
+        assertTrue(((WipStateChanged)event).getChange().isWip());
+    }
+
+    @Test
+    public void testWipStateChangeToFalse() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~Iwip2";
+
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 11,
+                "Test", "NEW", "rev1", null, true);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 11,
+                "Test", "NEW", "rev1", null, false);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected WipStateChanged but got " + event.getClass().getSimpleName(),
+                event instanceof WipStateChanged);
+        assertFalse(((WipStateChanged)event).getChange().isWip());
     }
 }

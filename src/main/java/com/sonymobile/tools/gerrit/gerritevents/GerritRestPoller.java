@@ -63,6 +63,7 @@ import com.sonymobile.tools.gerrit.gerritevents.dto.events.ChangeMerged;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.GerritTriggeredEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.PatchsetCreated;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.WipStateChanged;
 
 /**
  * Polls the Gerrit REST API over HTTPS to receive change events.
@@ -138,17 +139,21 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         final GerritChangeStatus status;
         /** The last known topic, or null. */
         final String topic;
+        /** Whether the change is work-in-progress. */
+        final boolean wip;
 
         /**
          * Creates a new ChangeState.
          * @param revision the revision.
          * @param status the status.
          * @param topic the topic, or null.
+         * @param wip whether the change is work-in-progress.
          */
-        ChangeState(String revision, GerritChangeStatus status, String topic) {
+        ChangeState(String revision, GerritChangeStatus status, String topic, boolean wip) {
             this.revision = revision;
             this.status = status;
             this.topic = topic;
+            this.wip = wip;
         }
     }
 
@@ -512,15 +517,24 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                     subject, changeNumber, changeStatus);
         }
 
-        // Extract current topic from the REST response for state tracking
+        // Check for WIP state change on known changes
+        if (previous != null && !isNew && !revisionChanged) {
+            detectWipStateChange(changeJson, previous, provider,
+                    currentRevObj, currentRevision, changeId, project, branch,
+                    subject, changeNumber, changeStatus);
+        }
+
+        // Extract current topic and WIP from the REST response for state tracking
         String currentTopic = changeJson.optString("topic", null);
         if (currentTopic != null && currentTopic.isEmpty()) {
             currentTopic = null;
         }
 
+        boolean currentWip = changeJson.optBoolean("work_in_progress", false);
+
         // Update known state
         knownChanges.put(changeId, new ChangeState(currentRevision, changeStatus,
-                currentTopic));
+                currentTopic, currentWip));
     }
 
     /**
@@ -580,6 +594,57 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                 logger.info("{}: Posted TopicChanged for change {}/{}: {} -> {}",
                         gerritName, project, changeNumber, previousTopic, currentTopic);
             }
+        }
+    }
+
+    /**
+     * Detects WIP (Work In Progress) state changes for a known change and emits
+     * a {@link WipStateChanged} event when the WIP state toggles.
+     *
+     * @param changeJson the REST API JSON for the change.
+     * @param previous the previous known state.
+     * @param provider the Provider to attach.
+     * @param currentRevObj the current revision JSON.
+     * @param currentRevision the current revision SHA.
+     * @param changeId the change ID.
+     * @param project the project name.
+     * @param branch the branch name.
+     * @param subject the change subject.
+     * @param changeNumber the change number.
+     * @param changeStatus the current status.
+     */
+    private void detectWipStateChange(JSONObject changeJson, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision,
+            String changeId, String project, String branch, String subject,
+            String changeNumber, GerritChangeStatus changeStatus) {
+
+        boolean currentWip = changeJson.optBoolean("work_in_progress", false);
+        if (previous.wip == currentWip) {
+            return;
+        }
+
+        Change change = buildChange(changeJson, changeId, project, branch, subject,
+                changeNumber, changeStatus);
+        change.setWip(currentWip);
+        PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
+
+        WipStateChanged event = new WipStateChanged();
+        event.setChange(change);
+        event.setPatchset(patchSet);
+        event.setProvider(provider);
+        event.setReceivedOn(System.currentTimeMillis());
+        if (changeJson.has("owner")) {
+            try {
+                event.setAccount(new Account(changeJson.getJSONObject("owner")));
+            } catch (Exception ex) {
+                logger.trace("{}: Could not parse owner for WIP change: {}",
+                        gerritName, ex.getMessage());
+            }
+        }
+        if (handler != null) {
+            handler.post(event);
+            logger.info("{}: Posted WipStateChanged for change {}/{}: {} -> {}",
+                    gerritName, project, changeNumber, previous.wip, currentWip);
         }
     }
 
