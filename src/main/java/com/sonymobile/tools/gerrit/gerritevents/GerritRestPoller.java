@@ -63,6 +63,7 @@ import com.sonymobile.tools.gerrit.gerritevents.dto.events.ChangeMerged;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.GerritTriggeredEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.PatchsetCreated;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.PrivateStateChanged;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.WipStateChanged;
 
 /**
@@ -141,6 +142,8 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         final String topic;
         /** Whether the change is work-in-progress. */
         final boolean wip;
+        /** Whether the change is private. */
+        final boolean isPrivate;
 
         /**
          * Creates a new ChangeState.
@@ -148,12 +151,14 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
          * @param status the status.
          * @param topic the topic, or null.
          * @param wip whether the change is work-in-progress.
+         * @param isPrivate whether the change is private.
          */
-        ChangeState(String revision, GerritChangeStatus status, String topic, boolean wip) {
+        ChangeState(String revision, GerritChangeStatus status, String topic, boolean wip, boolean isPrivate) {
             this.revision = revision;
             this.status = status;
             this.topic = topic;
             this.wip = wip;
+            this.isPrivate = isPrivate;
         }
     }
 
@@ -524,17 +529,25 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                     subject, changeNumber, changeStatus);
         }
 
-        // Extract current topic and WIP from the REST response for state tracking
+        // Check for private state change on known changes
+        if (previous != null && !isNew && !revisionChanged) {
+            detectPrivateStateChange(changeJson, previous, provider,
+                    currentRevObj, currentRevision, changeId, project, branch,
+                    subject, changeNumber, changeStatus);
+        }
+
+        // Extract current topic, WIP and private state from the REST response for state tracking
         String currentTopic = changeJson.optString("topic", null);
         if (currentTopic != null && currentTopic.isEmpty()) {
             currentTopic = null;
         }
 
         boolean currentWip = changeJson.optBoolean("work_in_progress", false);
+        boolean currentPrivate = changeJson.optBoolean("is_private", false);
 
         // Update known state
         knownChanges.put(changeId, new ChangeState(currentRevision, changeStatus,
-                currentTopic, currentWip));
+                currentTopic, currentWip, currentPrivate));
     }
 
     /**
@@ -645,6 +658,57 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             handler.post(event);
             logger.info("{}: Posted WipStateChanged for change {}/{}: {} -> {}",
                     gerritName, project, changeNumber, previous.wip, currentWip);
+        }
+    }
+
+    /**
+     * Detects private state changes for a known change and emits
+     * a {@link PrivateStateChanged} event when the private state toggles.
+     *
+     * @param changeJson the REST API JSON for the change.
+     * @param previous the previous known state.
+     * @param provider the Provider to attach.
+     * @param currentRevObj the current revision JSON.
+     * @param currentRevision the current revision SHA.
+     * @param changeId the change ID.
+     * @param project the project name.
+     * @param branch the branch name.
+     * @param subject the change subject.
+     * @param changeNumber the change number.
+     * @param changeStatus the current status.
+     */
+    private void detectPrivateStateChange(JSONObject changeJson, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision,
+            String changeId, String project, String branch, String subject,
+            String changeNumber, GerritChangeStatus changeStatus) {
+
+        boolean currentPrivate = changeJson.optBoolean("is_private", false);
+        if (previous.isPrivate == currentPrivate) {
+            return;
+        }
+
+        Change change = buildChange(changeJson, changeId, project, branch, subject,
+                changeNumber, changeStatus);
+        change.setPrivate(currentPrivate);
+        PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
+
+        PrivateStateChanged event = new PrivateStateChanged();
+        event.setChange(change);
+        event.setPatchset(patchSet);
+        event.setProvider(provider);
+        event.setReceivedOn(System.currentTimeMillis());
+        if (changeJson.has("owner")) {
+            try {
+                event.setAccount(new Account(changeJson.getJSONObject("owner")));
+            } catch (Exception ex) {
+                logger.trace("{}: Could not parse owner for private state change: {}",
+                        gerritName, ex.getMessage());
+            }
+        }
+        if (handler != null) {
+            handler.post(event);
+            logger.info("{}: Posted PrivateStateChanged for change {}/{}: {} -> {}",
+                    gerritName, project, changeNumber, previous.isPrivate, currentPrivate);
         }
     }
 

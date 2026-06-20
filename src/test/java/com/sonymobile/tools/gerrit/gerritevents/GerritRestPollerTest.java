@@ -43,6 +43,7 @@ import org.apache.http.auth.UsernamePasswordCredentials;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.attr.Provider;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
+import com.sonymobile.tools.gerrit.gerritevents.dto.events.PrivateStateChanged;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.WipStateChanged;
 import com.sonymobile.tools.gerrit.gerritevents.ssh.Authentication;
 import com.sonymobile.tools.gerrit.gerritevents.watchdog.WatchTimeExceptionData;
@@ -51,7 +52,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-//CS IGNORE MagicNumber FOR NEXT 600 LINES. REASON: TestData
+//CS IGNORE MagicNumber FOR NEXT 700 LINES. REASON: TestData
 
 /**
  * Tests for {@link GerritRestPoller}.
@@ -374,12 +375,26 @@ public class GerritRestPollerTest {
             int changeNumber, String subject, String status, String revision,
             String topic) {
         return buildRestChangeJson(changeId, project, branch, changeNumber, subject, status,
-                revision, topic, false);
+                revision, topic, false, false);
     }
 
+    /**
+     * Builds a REST API JSON change object with WIP and private flag support.
+     * @param changeId the change ID.
+     * @param project the project name.
+     * @param branch the branch name.
+     * @param changeNumber the change number.
+     * @param subject the change subject.
+     * @param status the change status.
+     * @param revision the current revision SHA.
+     * @param topic the topic, or null.
+     * @param wip whether the change is work-in-progress.
+     * @param isPrivate whether the change is private.
+     * @return a JSON object representing a REST API change.
+     */
     private JSONObject buildRestChangeJson(String changeId, String project, String branch,
             int changeNumber, String subject, String status, String revision,
-            String topic, boolean wip) {
+            String topic, boolean wip, boolean isPrivate) {
         JSONObject json = new JSONObject();
         json.put("id", changeId);
         json.put("project", project);
@@ -389,6 +404,7 @@ public class GerritRestPollerTest {
         json.put("status", status);
         json.put("current_revision", revision);
         json.put("work_in_progress", wip);
+        json.put("is_private", isPrivate);
         if (topic != null) {
             json.put("topic", topic);
         }
@@ -544,13 +560,13 @@ public class GerritRestPollerTest {
         String changeId = "proj~master~Iwip1";
 
         JSONObject first = buildRestChangeJson(changeId, "proj", "master", 10,
-                "Test", "NEW", "rev1", null, false);
+                "Test", "NEW", "rev1", null, false, false);
         org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
         assertEquals(1, handlerMock.eventCount);
         handlerMock.reset();
 
         JSONObject second = buildRestChangeJson(changeId, "proj", "master", 10,
-                "Test", "NEW", "rev1", null, true);
+                "Test", "NEW", "rev1", null, true, false);
         org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
 
         assertEquals(1, handlerMock.eventCount);
@@ -568,13 +584,13 @@ public class GerritRestPollerTest {
         String changeId = "proj~master~Iwip2";
 
         JSONObject first = buildRestChangeJson(changeId, "proj", "master", 11,
-                "Test", "NEW", "rev1", null, true);
+                "Test", "NEW", "rev1", null, true, false);
         org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
         assertEquals(1, handlerMock.eventCount);
         handlerMock.reset();
 
         JSONObject second = buildRestChangeJson(changeId, "proj", "master", 11,
-                "Test", "NEW", "rev1", null, false);
+                "Test", "NEW", "rev1", null, false, false);
         org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
 
         assertEquals(1, handlerMock.eventCount);
@@ -582,5 +598,55 @@ public class GerritRestPollerTest {
         assertTrue("Expected WipStateChanged but got " + event.getClass().getSimpleName(),
                 event instanceof WipStateChanged);
         assertFalse(((WipStateChanged)event).getChange().isWip());
+    }
+
+    // ---- Private state change detection tests ----
+
+    @Test
+    public void testPrivateStateChangeToTrue() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~Ipriv1";
+
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 20,
+                "Test", "NEW", "rev1", null, false, false);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 20,
+                "Test", "NEW", "rev1", null, false, true);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected PrivateStateChanged but got " + event.getClass().getSimpleName(),
+                event instanceof PrivateStateChanged);
+        assertTrue(((PrivateStateChanged)event).getChange().isPrivate());
+    }
+
+    @Test
+    public void testPrivateStateChangeToFalse() throws Exception {
+        handlerMock = new HandlerMock(null);
+        poller.setHandler(handlerMock);
+        Provider provider = createTestProvider();
+        String changeId = "proj~master~Ipriv2";
+
+        JSONObject first = buildRestChangeJson(changeId, "proj", "master", 21,
+                "Test", "NEW", "rev1", null, false, true);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", first, provider);
+        assertEquals(1, handlerMock.eventCount);
+        handlerMock.reset();
+
+        JSONObject second = buildRestChangeJson(changeId, "proj", "master", 21,
+                "Test", "NEW", "rev1", null, false, false);
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "processChange", second, provider);
+
+        assertEquals(1, handlerMock.eventCount);
+        GerritEvent event = handlerMock.capturedEvents.get(0);
+        assertTrue("Expected PrivateStateChanged but got " + event.getClass().getSimpleName(),
+                event instanceof PrivateStateChanged);
+        assertFalse(((PrivateStateChanged)event).getChange().isPrivate());
     }
 }
