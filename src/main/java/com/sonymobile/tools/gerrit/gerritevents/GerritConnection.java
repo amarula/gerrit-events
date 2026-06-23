@@ -489,10 +489,9 @@ public class GerritConnection extends Thread implements Connector, GerritEventSo
                 logger.error("ConnectionException: ", sshConEx);
             } catch (SshAuthenticationException sshAuthEx) {
                 logger.error("Could not authenticate to Gerrit server!"
-                        + "\n\tUsername: {}\n\tKeyFile: {}\n\tPassword: {}",
+                        + "\n\tUsername: {}\n\tKeyFile: {}",
                         new Object[]{authentication.getUsername(),
-                                authentication.getPrivateKeyFile(),
-                                authentication.getPrivateKeyFilePassword(), });
+                                authentication.getPrivateKeyFile(), });
                 logger.error("AuthenticationException: ", sshAuthEx);
             } catch (IOException ex) {
                 logger.error("Could not connect to Gerrit server! "
