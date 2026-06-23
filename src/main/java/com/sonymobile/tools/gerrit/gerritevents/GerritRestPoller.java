@@ -384,7 +384,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      */
     private void pollChanges() throws IOException {
         String queryPath = "a/changes/?q=is:open&n=" + maxChangesPerPoll
-                + "&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT&o=HASHTAGS";
+                + "&o=CURRENT_REVISION&o=DETAILED_ACCOUNTS&o=CURRENT_COMMIT";
         String body = httpGet(queryPath);
         JSONArray changes;
         try {
