@@ -28,6 +28,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedList;
@@ -37,6 +39,7 @@ import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 import net.sf.json.JSONSerializer;
 
+import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.Credentials;
@@ -44,6 +47,7 @@ import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,6 +76,7 @@ public class GerritRestQueryHandler extends GerritQueryHandler {
 
     private final String frontEndUrl;
     private final Credentials httpCredentials;
+    private final String proxy;
     private HttpClient httpClient;
 
     /**
@@ -89,6 +94,7 @@ public class GerritRestQueryHandler extends GerritQueryHandler {
               GerritDefaultValues.DEFAULT_GERRIT_SSH_CONNECTION_TIMEOUT);
         this.frontEndUrl = config.getGerritFrontEndUrl();
         this.httpCredentials = config.getHttpCredentials();
+        this.proxy = config.getGerritProxy();
     }
 
     /**
@@ -107,6 +113,7 @@ public class GerritRestQueryHandler extends GerritQueryHandler {
         super(hostName, sshPort, proxy, auth);
         this.frontEndUrl = frontEndUrl;
         this.httpCredentials = httpCredentials;
+        this.proxy = proxy;
     }
 
     // ---- Override the master queryJava method (6-param) ----
@@ -454,9 +461,18 @@ public class GerritRestQueryHandler extends GerritQueryHandler {
         if (httpClient == null) {
             CredentialsProvider credsProvider = new BasicCredentialsProvider();
             credsProvider.setCredentials(AuthScope.ANY, httpCredentials);
-            httpClient = HttpClients.custom()
-                    .setDefaultCredentialsProvider(credsProvider)
-                    .build();
+            HttpClientBuilder builder = HttpClients.custom()
+                    .setDefaultCredentialsProvider(credsProvider);
+            if (proxy != null && !proxy.isEmpty()) {
+                try {
+                    URL url = new URL(proxy);
+                    builder.setProxy(new HttpHost(url.getHost(), url.getPort(), url.getProtocol()));
+                } catch (MalformedURLException e) {
+                    logger.warn("Could not parse HTTP proxy URL, proceeding without proxy: {}",
+                            e.getMessage());
+                }
+            }
+            httpClient = builder.build();
         }
         return httpClient;
     }

@@ -41,8 +41,11 @@ import java.util.concurrent.CountDownLatch;
 
 import net.sf.json.JSONObject;
 
+import org.apache.http.HttpHost;
 import org.apache.http.auth.Credentials;
 import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.HttpClients;
 
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritChangeStatus;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
@@ -77,7 +80,8 @@ public class GerritRestPollerTest {
     private static class TestConfig implements GerritConnectionConfig2 {
         private String hostName = "gerrit.example.com";
         private int sshPort = 29418;
-        private String proxy = "";
+        /** Public for test use. */
+        String proxy = "";
         private String frontEndUrl = "https://gerrit.example.com/";
         private int pollInterval = 10;
         private int pollMaxChanges = 50;
@@ -729,5 +733,61 @@ public class GerritRestPollerTest {
                 knownChanges.containsKey("change_merged_seen"));
 
         assertEquals(2, knownChanges.size());
+    }
+
+    // ---- Proxy configuration tests ----
+
+    /**
+     * Tests that configureProxy does not set a proxy when the config proxy
+     * is null or empty.
+     */
+    @Test
+    public void testConfigureProxyNullAndEmpty() throws Exception {
+        HttpClientBuilder builder = HttpClients.custom();
+
+        config.proxy = null;
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
+        assertNull("Proxy should be null for null config",
+                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
+
+        config.proxy = "";
+        builder = HttpClients.custom();
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
+        assertNull("Proxy should be null for empty config",
+                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
+    }
+
+    //CS IGNORE MagicNumber FOR NEXT 20 LINES. REASON: Test assertion.
+    /**
+     * Tests that configureProxy sets the proxy on the builder when a valid
+     * proxy URL is configured.
+     */
+    @Test
+    public void testConfigureProxyValidUrl() throws Exception {
+        config.proxy = "http://proxy.example.com:8080";
+        HttpClientBuilder builder = HttpClients.custom();
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
+
+        HttpHost proxy = (HttpHost)
+                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy");
+        assertNotNull("Proxy should be set for valid URL", proxy);
+        assertEquals("proxy.example.com", proxy.getHostName());
+        assertEquals(8080, proxy.getPort());
+        assertEquals("http", proxy.getSchemeName());
+    }
+
+    /**
+     * Tests that configureProxy does not throw when a malformed proxy URL
+     * is configured, and leaves the builder without a proxy.
+     */
+    @Test
+    public void testConfigureProxyInvalidUrl() throws Exception {
+        config.proxy = ":::not-a-valid-url:::";
+        HttpClientBuilder builder = HttpClients.custom();
+        // Must not throw
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
+
+        assertNull("Proxy should be null after malformed URL",
+                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
     }
 }
