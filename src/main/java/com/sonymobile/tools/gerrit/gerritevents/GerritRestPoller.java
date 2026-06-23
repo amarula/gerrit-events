@@ -256,21 +256,14 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                 }
 
                 pollChanges();
-
-                if (!connected) {
-                    notifyConnectionEstablished();
-                }
+                notifyConnectionEstablished();
             } catch (IOException ex) {
                 logger.error("{}: Error during HTTPS poll: {}", gerritName, ex.getMessage());
-                if (connected) {
-                    notifyConnectionDown();
-                }
+                notifyConnectionDown();
                 sleepMillis(ERROR_SLEEP_MILLIS);
             } catch (Exception ex) {
                 logger.error("{}: Unexpected error during poll.", gerritName, ex);
-                if (connected) {
-                    notifyConnectionDown();
-                }
+                notifyConnectionDown();
                 sleepMillis(ERROR_SLEEP_MILLIS);
             }
 
@@ -936,16 +929,20 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      * Marks the connection as established and notifies listeners.
      */
     private void notifyConnectionEstablished() {
-        connected = true;
-        notifyListeners(GerritConnectionEvent.GERRIT_CONNECTION_ESTABLISHED);
+        if (!connected) {
+            connected = true;
+            notifyListeners(GerritConnectionEvent.GERRIT_CONNECTION_ESTABLISHED);
+        }
     }
 
     /**
      * Marks the connection as down and notifies listeners.
      */
     private void notifyConnectionDown() {
-        connected = false;
-        notifyListeners(GerritConnectionEvent.GERRIT_CONNECTION_DOWN);
+        if (connected) {
+            connected = false;
+            notifyListeners(GerritConnectionEvent.GERRIT_CONNECTION_DOWN);
+        }
     }
 
     /**
