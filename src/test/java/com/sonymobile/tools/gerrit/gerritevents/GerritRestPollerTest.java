@@ -30,9 +30,13 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
 import net.sf.json.JSONObject;
@@ -40,6 +44,7 @@ import net.sf.json.JSONObject;
 import org.apache.http.auth.Credentials;
 import org.apache.http.auth.UsernamePasswordCredentials;
 
+import com.sonymobile.tools.gerrit.gerritevents.dto.GerritChangeStatus;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
 import com.sonymobile.tools.gerrit.gerritevents.dto.attr.Provider;
 import com.sonymobile.tools.gerrit.gerritevents.dto.events.TopicChanged;
@@ -648,5 +653,81 @@ public class GerritRestPollerTest {
         assertTrue("Expected PrivateStateChanged but got " + event.getClass().getSimpleName(),
                 event instanceof PrivateStateChanged);
         assertFalse(((PrivateStateChanged)event).getChange().isPrivate());
+    }
+
+    // ---- Stale entry pruning tests ----
+
+    /**
+     * Tests that pruneStaleEntries removes MERGED, ABANDONED, and UNKNOWN
+     * (e.g. DELETED) entries that are no longer present in the poll response,
+     * while preserving NEW entries (pagination safety) and entries that were
+     * seen in the current poll.
+     */
+    @Test
+    public void testPruneStaleEntries() throws Exception {
+        // Get the knownChanges map from the poller
+        @SuppressWarnings("unchecked")
+        Map<String, Object> knownChanges = (Map<String, Object>)
+                org.powermock.reflect.Whitebox.getInternalState(poller, "knownChanges");
+
+        // Construct ChangeState objects via reflection
+        // (ChangeState is a private inner class; Whitebox.invokeConstructor
+        //  can't resolve null argument types, so use direct reflection)
+        Class<?> csClass = org.powermock.reflect.Whitebox.getInnerClassType(
+                GerritRestPoller.class, "ChangeState");
+        Constructor<?> csCtor = csClass.getDeclaredConstructor(
+                String.class, GerritChangeStatus.class, String.class,
+                boolean.class, boolean.class);
+        csCtor.setAccessible(true);
+
+        Object stateMerged = csCtor.newInstance(
+                "rev1", GerritChangeStatus.MERGED, null, false, false);
+        Object stateAbandoned = csCtor.newInstance(
+                "rev2", GerritChangeStatus.ABANDONED, null, false, false);
+        Object stateNew = csCtor.newInstance(
+                "rev3", GerritChangeStatus.NEW, null, false, false);
+        Object stateUnknown = csCtor.newInstance(
+                "rev5", GerritChangeStatus.UNKNOWN, null, false, false);
+        Object stateMergedSeen = csCtor.newInstance(
+                "rev4", GerritChangeStatus.MERGED, null, false, false);
+
+        // Populate with 5 known changes:
+        // - change_merged:       MERGED, not present in this poll
+        // - change_abandoned:    ABANDONED, not present in this poll
+        // - change_new:          NEW, but not in this poll (pagination edge case)
+        // - change_unknown:      UNKNOWN (e.g. DELETED), not present in this poll
+        // - change_merged_seen:  MERGED, but still present in this poll (just closed)
+        knownChanges.put("change_merged", stateMerged);
+        knownChanges.put("change_abandoned", stateAbandoned);
+        knownChanges.put("change_new", stateNew);
+        knownChanges.put("change_unknown", stateUnknown);
+        knownChanges.put("change_merged_seen", stateMergedSeen);
+        assertEquals(5, knownChanges.size());
+
+        // Simulate the current poll response: only "change_merged_seen" was returned
+        Set<String> seenChangeIds = new HashSet<String>();
+        seenChangeIds.add("change_merged_seen");
+
+        // Invoke pruning
+        org.powermock.reflect.Whitebox.invokeMethod(poller, "pruneStaleEntries",
+                seenChangeIds);
+
+        // change_merged (MERGED, not seen) -> pruned
+        assertFalse("MERGED entry not in poll should be pruned",
+                knownChanges.containsKey("change_merged"));
+        // change_abandoned (ABANDONED, not seen) -> pruned
+        assertFalse("ABANDONED entry not in poll should be pruned",
+                knownChanges.containsKey("change_abandoned"));
+        // change_unknown (UNKNOWN/DELETED, not seen) -> pruned
+        assertFalse("UNKNOWN (e.g. DELETED) entry not in poll should be pruned",
+                knownChanges.containsKey("change_unknown"));
+        // change_new (NEW, not seen) -> preserved (pagination safety)
+        assertTrue("NEW entry not in poll must be preserved (pagination safety)",
+                knownChanges.containsKey("change_new"));
+        // change_merged_seen (MERGED, but in poll) -> preserved
+        assertTrue("MERGED entry still in poll should be preserved",
+                knownChanges.containsKey("change_merged_seen"));
+
+        assertEquals(2, knownChanges.size());
     }
 }

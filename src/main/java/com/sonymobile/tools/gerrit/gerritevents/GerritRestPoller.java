@@ -31,6 +31,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -402,6 +404,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
 
         logger.debug("{}: Processing {} open changes.", gerritName, changes.size());
         Provider provider = createProvider();
+        Set<String> seenChangeIds = new HashSet<String>();
 
         for (int i = 0; i < changes.size(); i++) {
             if (shutdownInProgress || interrupted()) {
@@ -409,10 +412,45 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             }
             try {
                 JSONObject changeJson = changes.getJSONObject(i);
+                String changeId = changeJson.getString("id");
+                seenChangeIds.add(changeId);
                 processChange(changeJson, provider);
             } catch (Exception ex) {
                 logger.warn("{}: Error processing change at index {}: {}",
                         gerritName, i, ex.getMessage());
+            }
+        }
+
+        // Prune stale entries: remove changes that are no longer open
+        // (MERGED, ABANDONED, or UNKNOWN — e.g. DELETED — and not present
+        // in the current poll response). This prevents unbounded memory
+        // growth from accumulating closed changes.
+        pruneStaleEntries(seenChangeIds);
+    }
+
+    /**
+     * Removes entries from {@link #knownChanges} whose status is MERGED,
+     * ABANDONED, or UNKNOWN (e.g. DELETED) and that are not present in
+     * the given set of seen change IDs. NEW entries are never pruned,
+     * even if absent from the current poll (pagination safety).
+     *
+     * <p>Package visibility for testing.</p>
+     *
+     * @param seenChangeIds the set of change IDs present in the current poll.
+     */
+    void pruneStaleEntries(Set<String> seenChangeIds) {
+        Iterator<Map.Entry<String, ChangeState>> it = knownChanges.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, ChangeState> entry = it.next();
+            if (seenChangeIds.contains(entry.getKey())) {
+                continue;
+            }
+            GerritChangeStatus status = entry.getValue().status;
+            if (status == GerritChangeStatus.MERGED
+                    || status == GerritChangeStatus.ABANDONED
+                    || status == GerritChangeStatus.UNKNOWN) {
+                it.remove();
+                logger.trace("{}: Pruned stale entry for change {}", gerritName, entry.getKey());
             }
         }
     }
