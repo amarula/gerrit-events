@@ -905,14 +905,22 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
 
     /**
      * Creates a Provider for the current connection.
+     *
+     * <p>When the configured hostname is empty (e.g. SSH is not in use), the host
+     * is derived from {@code frontEndUrl} — which is the HTTPS endpoint configured
+     * for this connection.</p>
      * @return a new Provider.
      */
     private Provider createProvider() {
         //CS IGNORE AvoidInlineConditionals FOR NEXT 1 LINES. REASON: Readable null check.
         String version = gerritVersion != null ? gerritVersion : "";
+        String host = config.getGerritHostName();
+        if (host == null || host.isEmpty()) {
+            host = frontEndUrl;
+        }
         return new Provider(
                 gerritName,
-                config.getGerritHostName(),
+                host,
                 String.valueOf(config.getGerritSshPort()),
                 GERRIT_PROTOCOL_SCHEME_NAME,
                 frontEndUrl,
