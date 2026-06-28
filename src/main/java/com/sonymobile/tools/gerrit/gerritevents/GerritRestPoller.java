@@ -30,12 +30,10 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -480,13 +478,9 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      * @param provider the Provider to attach to events.
      */
     private void processChange(JSONObject changeJson, Provider provider) {
-        String changeId = changeJson.getString("id");
-        String project = changeJson.getString("project");
-        String branch = changeJson.optString("branch", "");
-        String subject = changeJson.optString("subject", "");
-        String changeNumber = String.valueOf(changeJson.optInt("_number", -1));
-        String status = changeJson.optString("status", "NEW");
-        GerritChangeStatus changeStatus = GerritChangeStatus.fromString(status);
+        // Build the Change DTO once — reused by all event-detection branches
+        Change change = buildChange(changeJson);
+        String changeId = change.getId();
 
         // Determine current revision
         String currentRevision = null;
@@ -506,6 +500,17 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             return;
         }
 
+        // Extract abandoner (only available from raw JSON, not on Change DTO)
+        Account abandoner = null;
+        if (changeJson.has("abandoner")) {
+            try {
+                abandoner = new Account(changeJson.getJSONObject("abandoner"));
+            } catch (Exception ex) {
+                logger.trace("{}: Could not parse abandoner for change {}: {}",
+                        gerritName, changeId, ex.getMessage());
+            }
+        }
+
         ChangeState previous = knownChanges.get(changeId);
 
         // Check if this is a new change or the revision has changed
@@ -513,50 +518,36 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         boolean revisionChanged = (previous != null && !currentRevision.equals(previous.revision));
 
         if (isNew || revisionChanged) {
-            // Build Change and PatchSet DTOs
-            Change change = buildChange(changeJson, changeId, project, branch, subject,
-                    changeNumber, changeStatus);
             PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
 
-            // Build PatchsetCreated event
             PatchsetCreated event = new PatchsetCreated();
             event.setChange(change);
             event.setPatchset(patchSet);
             event.setProvider(provider);
             event.setReceivedOn(System.currentTimeMillis());
-
-            // Set the account from owner
-            if (changeJson.has("owner")) {
-                try {
-                    event.setAccount(new Account(changeJson.getJSONObject("owner")));
-                } catch (Exception ex) {
-                    logger.trace("{}: Could not parse owner for change {}: {}",
-                            gerritName, changeId, ex.getMessage());
-                }
-            }
+            event.setAccount(change.getOwner());
 
             if (handler != null) {
                 handler.post(event);
                 //CS IGNORE AvoidInlineConditionals FOR NEXT 1 LINES. REASON: Readable ternary.
                 String changeType = isNew ? "(new)" : "(updated)";
                 logger.info("{}: Posted PatchsetCreated for change {}/{} rev {} {}",
-                        gerritName, project, changeNumber, currentRevision, changeType);
+                        gerritName, change.getProject(), change.getNumber(),
+                        currentRevision, changeType);
             }
         }
 
         // Check for status transitions on known changes
-        if (previous != null && previous.status != changeStatus) {
+        if (previous != null && previous.status != change.getStatus()) {
             GerritTriggeredEvent statusEvent = null;
-            switch (changeStatus) {
+            switch (change.getStatus()) {
                 case MERGED:
-                    statusEvent = buildStatusEvent(changeJson, project, branch, subject,
-                            changeNumber, currentRevision, currentRevObj, provider,
-                            ChangeMerged.class);
+                    statusEvent = buildStatusEvent(change, currentRevision, currentRevObj,
+                            provider, abandoner, ChangeMerged.class);
                     break;
                 case ABANDONED:
-                    statusEvent = buildStatusEvent(changeJson, project, branch, subject,
-                            changeNumber, currentRevision, currentRevObj, provider,
-                            ChangeAbandoned.class);
+                    statusEvent = buildStatusEvent(change, currentRevision, currentRevObj,
+                            provider, abandoner, ChangeAbandoned.class);
                     break;
                 default:
                     // RESTORED status is not directly distinguishable from NEW
@@ -566,78 +557,43 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             if (statusEvent != null && handler != null) {
                 handler.post(statusEvent);
                 logger.info("{}: Posted status transition for change {}/{}: {} -> {}",
-                        gerritName, project, changeNumber, previous.status, changeStatus);
+                        gerritName, change.getProject(), change.getNumber(),
+                        previous.status, change.getStatus());
             }
         }
 
-        // Check for topic changes on known changes
+        // Check for topic/WIP/private changes on known changes
         if (previous != null && !isNew && !revisionChanged) {
-            detectTopicChange(changeJson, previous, provider,
-                    currentRevObj, currentRevision, changeId, project, branch,
-                    subject, changeNumber, changeStatus);
+            detectTopicChange(change, previous, provider, currentRevObj, currentRevision);
+            detectWipStateChange(change, previous, provider, currentRevObj, currentRevision);
+            detectPrivateStateChange(change, previous, provider, currentRevObj, currentRevision);
         }
 
-        // Check for WIP state change on known changes
-        if (previous != null && !isNew && !revisionChanged) {
-            detectWipStateChange(changeJson, previous, provider,
-                    currentRevObj, currentRevision, changeId, project, branch,
-                    subject, changeNumber, changeStatus);
-        }
-
-        // Check for private state change on known changes
-        if (previous != null && !isNew && !revisionChanged) {
-            detectPrivateStateChange(changeJson, previous, provider,
-                    currentRevObj, currentRevision, changeId, project, branch,
-                    subject, changeNumber, changeStatus);
-        }
-
-        // Extract current topic, WIP and private state from the REST response for state tracking
-        String currentTopic = changeJson.optString("topic", null);
-        if (currentTopic != null && currentTopic.isEmpty()) {
-            currentTopic = null;
-        }
-
-        boolean currentWip = changeJson.optBoolean("work_in_progress", false);
-        boolean currentPrivate = changeJson.optBoolean("is_private", false);
-
-        // Update known state
-        knownChanges.put(changeId, new ChangeState(currentRevision, changeStatus,
-                currentTopic, currentWip, currentPrivate));
+        // Update known state from the Change DTO
+        knownChanges.put(changeId, new ChangeState(currentRevision, change.getStatus(),
+                change.getTopic(), change.isWip(), change.isPrivate()));
     }
 
     /**
      * Detects topic changes for a known change and emits a
      * {@link TopicChanged} event when the topic changes.
      *
-     * @param changeJson the REST API JSON for the change.
+     * @param change the pre-built Change DTO.
      * @param previous the previous known state.
      * @param provider the Provider to attach.
      * @param currentRevObj the current revision JSON.
      * @param currentRevision the current revision SHA.
-     * @param changeId the change ID.
-     * @param project the project name.
-     * @param branch the branch name.
-     * @param subject the change subject.
-     * @param changeNumber the change number.
-     * @param changeStatus the current status.
      */
-    private void detectTopicChange(JSONObject changeJson, ChangeState previous,
-            Provider provider, JSONObject currentRevObj, String currentRevision,
-            String changeId, String project, String branch, String subject,
-            String changeNumber, GerritChangeStatus changeStatus) {
+    private void detectTopicChange(Change change, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision) {
 
-        String currentTopic = changeJson.optString("topic", null);
-        if (currentTopic != null && currentTopic.isEmpty()) {
-            currentTopic = null;
-        }
+        String currentTopic = change.getTopic();
         String previousTopic = previous.topic;
 
         //CS IGNORE AvoidInlineConditionals FOR NEXT 2 LINES. REASON: Readable null-safe.
         boolean topicChanged = (previousTopic == null)
                 ? (currentTopic != null) : !previousTopic.equals(currentTopic);
         if (topicChanged) {
-            Change change = buildChange(changeJson, changeId, project, branch, subject,
-                    changeNumber, changeStatus);
             PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
 
             TopicChanged topicEvent = new TopicChanged();
@@ -648,19 +604,16 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             if (previousTopic != null) {
                 topicEvent.setOldTopic(previousTopic);
             }
-            if (changeJson.has("owner")) {
-                try {
-                    topicEvent.setChanger(new Account(changeJson.getJSONObject("owner")));
-                    topicEvent.setAccount(new Account(changeJson.getJSONObject("owner")));
-                } catch (Exception ex) {
-                    logger.trace("{}: Could not parse changer for topic change: {}",
-                            gerritName, ex.getMessage());
-                }
+            Account owner = change.getOwner();
+            if (owner != null) {
+                topicEvent.setChanger(owner);
+                topicEvent.setAccount(owner);
             }
             if (handler != null) {
                 handler.post(topicEvent);
                 logger.info("{}: Posted TopicChanged for change {}/{}: {} -> {}",
-                        gerritName, project, changeNumber, previousTopic, currentTopic);
+                        gerritName, change.getProject(), change.getNumber(),
+                        previousTopic, currentTopic);
             }
         }
     }
@@ -669,31 +622,20 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      * Detects WIP (Work In Progress) state changes for a known change and emits
      * a {@link WipStateChanged} event when the WIP state toggles.
      *
-     * @param changeJson the REST API JSON for the change.
+     * @param change the pre-built Change DTO.
      * @param previous the previous known state.
      * @param provider the Provider to attach.
      * @param currentRevObj the current revision JSON.
      * @param currentRevision the current revision SHA.
-     * @param changeId the change ID.
-     * @param project the project name.
-     * @param branch the branch name.
-     * @param subject the change subject.
-     * @param changeNumber the change number.
-     * @param changeStatus the current status.
      */
-    private void detectWipStateChange(JSONObject changeJson, ChangeState previous,
-            Provider provider, JSONObject currentRevObj, String currentRevision,
-            String changeId, String project, String branch, String subject,
-            String changeNumber, GerritChangeStatus changeStatus) {
+    private void detectWipStateChange(Change change, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision) {
 
-        boolean currentWip = changeJson.optBoolean("work_in_progress", false);
+        boolean currentWip = change.isWip();
         if (previous.wip == currentWip) {
             return;
         }
 
-        Change change = buildChange(changeJson, changeId, project, branch, subject,
-                changeNumber, changeStatus);
-        change.setWip(currentWip);
         PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
 
         WipStateChanged event = new WipStateChanged();
@@ -701,18 +643,12 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         event.setPatchset(patchSet);
         event.setProvider(provider);
         event.setReceivedOn(System.currentTimeMillis());
-        if (changeJson.has("owner")) {
-            try {
-                event.setAccount(new Account(changeJson.getJSONObject("owner")));
-            } catch (Exception ex) {
-                logger.trace("{}: Could not parse owner for WIP change: {}",
-                        gerritName, ex.getMessage());
-            }
-        }
+        event.setAccount(change.getOwner());
         if (handler != null) {
             handler.post(event);
             logger.info("{}: Posted WipStateChanged for change {}/{}: {} -> {}",
-                    gerritName, project, changeNumber, previous.wip, currentWip);
+                    gerritName, change.getProject(), change.getNumber(),
+                    previous.wip, currentWip);
         }
     }
 
@@ -720,31 +656,20 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      * Detects private state changes for a known change and emits
      * a {@link PrivateStateChanged} event when the private state toggles.
      *
-     * @param changeJson the REST API JSON for the change.
+     * @param change the pre-built Change DTO.
      * @param previous the previous known state.
      * @param provider the Provider to attach.
      * @param currentRevObj the current revision JSON.
      * @param currentRevision the current revision SHA.
-     * @param changeId the change ID.
-     * @param project the project name.
-     * @param branch the branch name.
-     * @param subject the change subject.
-     * @param changeNumber the change number.
-     * @param changeStatus the current status.
      */
-    private void detectPrivateStateChange(JSONObject changeJson, ChangeState previous,
-            Provider provider, JSONObject currentRevObj, String currentRevision,
-            String changeId, String project, String branch, String subject,
-            String changeNumber, GerritChangeStatus changeStatus) {
+    private void detectPrivateStateChange(Change change, ChangeState previous,
+            Provider provider, JSONObject currentRevObj, String currentRevision) {
 
-        boolean currentPrivate = changeJson.optBoolean("is_private", false);
+        boolean currentPrivate = change.isPrivate();
         if (previous.isPrivate == currentPrivate) {
             return;
         }
 
-        Change change = buildChange(changeJson, changeId, project, branch, subject,
-                changeNumber, changeStatus);
-        change.setPrivate(currentPrivate);
         PatchSet patchSet = buildPatchSet(currentRevObj, currentRevision);
 
         PrivateStateChanged event = new PrivateStateChanged();
@@ -752,66 +677,42 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         event.setPatchset(patchSet);
         event.setProvider(provider);
         event.setReceivedOn(System.currentTimeMillis());
-        if (changeJson.has("owner")) {
-            try {
-                event.setAccount(new Account(changeJson.getJSONObject("owner")));
-            } catch (Exception ex) {
-                logger.trace("{}: Could not parse owner for private state change: {}",
-                        gerritName, ex.getMessage());
-            }
-        }
+        event.setAccount(change.getOwner());
         if (handler != null) {
             handler.post(event);
             logger.info("{}: Posted PrivateStateChanged for change {}/{}: {} -> {}",
-                    gerritName, project, changeNumber, previous.isPrivate, currentPrivate);
+                    gerritName, change.getProject(), change.getNumber(),
+                    previous.isPrivate, currentPrivate);
         }
     }
 
     /**
      * Builds a Change DTO from the REST API JSON.
+     * Uses {@link Change#fromJson} for standard fields and applies
+     * REST-API-specific fixups for fields whose key names differ from
+     * the event-stream format ({@code _number}, {@code work_in_progress},
+     * {@code is_private}, and the missing {@code url}).
+     *
      * @param changeJson the JSON object for this change.
-     * @param changeId the change ID.
-     * @param project the project name.
-     * @param branch the branch name.
-     * @param subject the change subject.
-     * @param changeNumber the change number.
-     * @param status the change status.
      * @return a new Change DTO.
      */
-    private Change buildChange(JSONObject changeJson, String changeId, String project,
-            String branch, String subject, String changeNumber, GerritChangeStatus status) {
+    private Change buildChange(JSONObject changeJson) {
         Change change = new Change();
-        change.setProject(project);
-        change.setBranch(branch);
-        change.setId(changeId);
+        change.fromJson(changeJson);
+
+        // Fixup: REST API uses "_number" (int), not "number" (string)
+        String changeNumber = String.valueOf(changeJson.optInt("_number", -1));
         change.setNumber(changeNumber);
-        change.setSubject(subject);
-        change.setStatus(status);
-        if (changeJson.has("owner")) {
-            try {
-                change.setOwner(new Account(changeJson.getJSONObject("owner")));
-            } catch (Exception ex) {
-                logger.trace("Could not set owner on change: {}", ex.getMessage());
-            }
-        }
-        // Set URL
-        String url = frontEndUrl + changeNumber;
-        change.setUrl(url);
-        // Set topic if present
-        if (changeJson.has("topic")) {
-            change.setTopic(changeJson.getString("topic"));
-        }
-        // Set hashtags if present
-        if (changeJson.has("hashtags")) {
-            JSONArray tags = changeJson.getJSONArray("hashtags");
-            List<String> hashtagList = new ArrayList<String>(tags.size());
-            for (int j = 0; j < tags.size(); j++) {
-                hashtagList.add(tags.getString(j));
-            }
-            change.setHashtags(hashtagList);
-        } else {
-            change.setHashtags(Collections.<String>emptyList());
-        }
+
+        // Fixup: REST API uses "work_in_progress", not "wip"
+        change.setWip(changeJson.optBoolean("work_in_progress", false));
+
+        // Fixup: REST API uses "is_private", not "private"
+        change.setPrivate(changeJson.optBoolean("is_private", false));
+
+        // Fixup: REST API has no "url" field — construct it
+        change.setUrl(frontEndUrl + changeNumber);
+
         return change;
     }
 
@@ -851,24 +752,17 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
 
     /**
      * Builds a status transition event (ChangeMerged, ChangeAbandoned, etc.).
-     * @param changeJson the JSON object for the change.
-     * @param project the project name.
-     * @param branch the branch name.
-     * @param subject the change subject.
-     * @param changeNumber the change number.
+     * @param change the pre-built Change DTO.
      * @param revision the current revision SHA.
      * @param revisionObj the JSON object for the revision.
      * @param provider the Provider to attach.
+     * @param abandoner the abandoner Account, or null.
      * @param eventClass the event class to build (ChangeMerged.class or ChangeAbandoned.class).
      * @return a new GerritTriggeredEvent, or null on failure.
      */
-    private GerritTriggeredEvent buildStatusEvent(JSONObject changeJson, String project,
-            String branch, String subject, String changeNumber, String revision,
-            JSONObject revisionObj, Provider provider, Class<?> eventClass) {
+    private GerritTriggeredEvent buildStatusEvent(Change change, String revision,
+            JSONObject revisionObj, Provider provider, Account abandoner, Class<?> eventClass) {
         try {
-            Change change = buildChange(changeJson, changeJson.getString("id"), project, branch,
-                    subject, changeNumber, GerritChangeStatus.fromString(
-                            changeJson.optString("status", "")));
             PatchSet patchSet = buildPatchSet(revisionObj, revision);
 
             if (eventClass == ChangeMerged.class) {
@@ -877,9 +771,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                 event.setPatchset(patchSet);
                 event.setProvider(provider);
                 event.setReceivedOn(System.currentTimeMillis());
-                if (changeJson.has("owner")) {
-                    event.setAccount(new Account(changeJson.getJSONObject("owner")));
-                }
+                event.setAccount(change.getOwner());
                 return event;
             } else if (eventClass == ChangeAbandoned.class) {
                 ChangeAbandoned event = new ChangeAbandoned();
@@ -887,13 +779,9 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                 event.setPatchset(patchSet);
                 event.setProvider(provider);
                 event.setReceivedOn(System.currentTimeMillis());
-                if (changeJson.has("owner")) {
-                    event.setAccount(new Account(changeJson.getJSONObject("owner")));
-                }
-                // Set abandoner if available
-                if (changeJson.has("abandoner")) {
-                    // Store abandoner as the account field for ChangeAbandoned
-                    event.setAbandoner(new Account(changeJson.getJSONObject("abandoner")));
+                event.setAccount(change.getOwner());
+                if (abandoner != null) {
+                    event.setAbandoner(abandoner);
                 }
                 return event;
             }
