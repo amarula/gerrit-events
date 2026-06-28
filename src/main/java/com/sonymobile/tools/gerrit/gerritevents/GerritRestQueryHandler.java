@@ -32,6 +32,7 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -394,26 +395,17 @@ public class GerritRestQueryHandler extends GerritQueryHandler {
 
     /**
      * Converts a Gerrit ISO-8601 date string to epoch seconds.
+     * Delegates to {@link GerritRestPoller#parseGerritDate}.
      *
      * @param dateStr the date string, e.g. "2023-01-15 10:00:00.000000000".
      * @return epoch seconds, or 0 if parsing fails.
      */
     private long convertToEpochSeconds(String dateStr) {
-        if (dateStr == null || dateStr.isEmpty()) {
+        Date d = GerritRestPoller.parseGerritDate(dateStr);
+        if (d == null) {
             return 0;
         }
-        try {
-            String normalized = dateStr.replace(" ", "T");
-            int dotIndex = normalized.indexOf('.');
-            if (dotIndex >= 0) {
-                normalized = normalized.substring(0, dotIndex);
-            }
-            java.util.Date d = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss").parse(normalized);
-            return d.getTime() / MILLIS_PER_SECOND;
-        } catch (Exception ex) {
-            logger.trace("Could not parse date: {}", dateStr, ex);
-            return 0;
-        }
+        return d.toInstant().getEpochSecond();
     }
 
     /**
