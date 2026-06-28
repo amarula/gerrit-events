@@ -232,7 +232,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
 
     @Override
     public void reconnect() {
-        logger.info("{}: Reconnect requested; resetting known changes cache.", gerritName);
+        logger.debug("{}: Reconnect requested; resetting known changes cache.", gerritName);
         knownChanges.clear();
     }
 
@@ -531,7 +531,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
                 handler.post(event);
                 //CS IGNORE AvoidInlineConditionals FOR NEXT 1 LINES. REASON: Readable ternary.
                 String changeType = isNew ? "(new)" : "(updated)";
-                logger.info("{}: Posted PatchsetCreated for change {}/{} rev {} {}",
+                logger.debug("{}: Posted PatchsetCreated for change {}/{} rev {} {}",
                         gerritName, change.getProject(), change.getNumber(),
                         currentRevision, changeType);
             }
@@ -556,7 +556,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             }
             if (statusEvent != null && handler != null) {
                 handler.post(statusEvent);
-                logger.info("{}: Posted status transition for change {}/{}: {} -> {}",
+                logger.debug("{}: Posted status transition for change {}/{}: {} -> {}",
                         gerritName, change.getProject(), change.getNumber(),
                         previous.status, change.getStatus());
             }
@@ -611,7 +611,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             }
             if (handler != null) {
                 handler.post(topicEvent);
-                logger.info("{}: Posted TopicChanged for change {}/{}: {} -> {}",
+                logger.debug("{}: Posted TopicChanged for change {}/{}: {} -> {}",
                         gerritName, change.getProject(), change.getNumber(),
                         previousTopic, currentTopic);
             }
@@ -646,7 +646,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         event.setAccount(change.getOwner());
         if (handler != null) {
             handler.post(event);
-            logger.info("{}: Posted WipStateChanged for change {}/{}: {} -> {}",
+            logger.debug("{}: Posted WipStateChanged for change {}/{}: {} -> {}",
                     gerritName, change.getProject(), change.getNumber(),
                     previous.wip, currentWip);
         }
@@ -680,7 +680,7 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         event.setAccount(change.getOwner());
         if (handler != null) {
             handler.post(event);
-            logger.info("{}: Posted PrivateStateChanged for change {}/{}: {} -> {}",
+            logger.debug("{}: Posted PrivateStateChanged for change {}/{}: {} -> {}",
                     gerritName, change.getProject(), change.getNumber(),
                     previous.isPrivate, currentPrivate);
         }
