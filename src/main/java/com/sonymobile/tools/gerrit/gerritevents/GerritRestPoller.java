@@ -437,7 +437,14 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
             }
             try {
                 JSONObject changeJson = changes.getJSONObject(i);
-                String changeId = changeJson.getString("id");
+                // Use hex Change-Id (change_id) as key, not the REST "id" triple.
+                // This must match the key used in processChange() / knownChanges.
+                String changeId;
+                if (changeJson.has("change_id")) {
+                    changeId = changeJson.getString("change_id");
+                } else {
+                    changeId = changeJson.getString("id");
+                }
                 seenChangeIds.add(changeId);
                 processChange(changeJson, provider);
             } catch (Exception ex) {
@@ -724,6 +731,13 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         // Fixup: REST API uses "_number" (int), not "number" (string)
         String changeNumber = String.valueOf(changeJson.optInt("_number", -1));
         change.setNumber(changeNumber);
+
+        // Fixup: REST API "id" is the full "project~changeNumber" triple.
+        // Use the hex "change_id" instead, so ChangeId.asUrlPart() produces
+        // the valid project~branch~ChangeIdHex triple for Gerrit URLs.
+        if (changeJson.has("change_id")) {
+            change.setId(changeJson.getString("change_id"));
+        }
 
         // Fixup: REST API uses "work_in_progress", not "wip"
         change.setWip(changeJson.optBoolean("work_in_progress", false));
