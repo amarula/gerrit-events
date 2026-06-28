@@ -216,6 +216,9 @@ public class GerritRestPollerTest {
         poller = new GerritRestPoller("testServer", config);
         handlerMock = new HandlerMock(null);
         listenerMock = new ListenerMock(null);
+        // Tests exercise processChange() directly; set firstPollDone so
+        // the guard does not skip event emission for every call.
+        org.powermock.reflect.Whitebox.setInternalState(poller, "firstPollDone", true);
     }
 
     /**

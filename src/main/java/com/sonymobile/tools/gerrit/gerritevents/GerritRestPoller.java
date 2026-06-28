@@ -129,6 +129,14 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
     private HttpClient httpClient;
 
     /**
+     * True after the first successful poll has seeded the baseline state.
+     * When false, {@link #processChange} silently populates
+     * {@link #knownChanges} without emitting events, preventing all open
+     * changes from re-firing PatchsetCreated after a restart.
+     */
+    private volatile boolean firstPollDone;
+
+    /**
      * Tracks the last known state of each change.
      * Key: changeId, Value: {revision, status}
      */
@@ -232,8 +240,10 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
 
     @Override
     public void reconnect() {
-        logger.debug("{}: Reconnect requested; resetting known changes cache.", gerritName);
-        knownChanges.clear();
+        // On the next poll, re-seed the baseline silently so that
+        // existing open changes aren't replayed as PatchsetCreated.
+        firstPollDone = false;
+        logger.debug("{}: Reconnect requested; will re-seed baseline on next poll.", gerritName);
     }
 
     // ---- Thread main loop ----
@@ -441,6 +451,8 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         // in the current poll response). This prevents unbounded memory
         // growth from accumulating closed changes.
         pruneStaleEntries(seenChangeIds);
+
+        firstPollDone = true;
     }
 
     /**
@@ -512,6 +524,15 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
         }
 
         ChangeState previous = knownChanges.get(changeId);
+
+        // On the first poll after startup, silently seed the baseline state.
+        // This prevents all open changes from re-firing PatchsetCreated after
+        // a restart while still populating knownChanges for delta detection.
+        if (!firstPollDone) {
+            knownChanges.put(changeId, new ChangeState(currentRevision, change.getStatus(),
+                    change.getTopic(), change.isWip(), change.isPrivate()));
+            return;
+        }
 
         // Check if this is a new change or the revision has changed
         boolean isNew = (previous == null);
