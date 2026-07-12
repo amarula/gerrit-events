@@ -27,8 +27,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Date;
@@ -43,18 +41,13 @@ import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 import net.sf.json.JSONSerializer;
 
-import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.Credentials;
-import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.client.HttpClients;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.sonymobile.tools.gerrit.gerritevents.helpers.HttpClientFactory;
 
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritChangeKind;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritChangeStatus;
@@ -325,32 +318,8 @@ public class GerritRestPoller extends Thread implements GerritEventSource, Conne
      * @return a configured HttpClient.
      */
     private HttpClient createHttpClient() {
-        Credentials creds = config.getHttpCredentials();
-        CredentialsProvider credsProvider = new BasicCredentialsProvider();
-        credsProvider.setCredentials(AuthScope.ANY, creds);
-        HttpClientBuilder builder = HttpClients.custom()
-                .setDefaultCredentialsProvider(credsProvider);
-        configureProxy(builder);
-        return builder.build();
-    }
-
-    /**
-     * Configures an HTTP proxy on the given client builder if a proxy is
-     * defined in the configuration.
-     *
-     * @param builder the HttpClientBuilder to configure.
-     */
-    private void configureProxy(HttpClientBuilder builder) {
-        String proxyUrl = config.getGerritProxy();
-        if (proxyUrl != null && !proxyUrl.isEmpty()) {
-            try {
-                URL url = new URL(proxyUrl);
-                builder.setProxy(new HttpHost(url.getHost(), url.getPort(), url.getProtocol()));
-            } catch (MalformedURLException e) {
-                logger.warn("{}: Could not parse HTTP proxy URL, proceeding without proxy: {}",
-                        gerritName, e.getMessage());
-            }
-        }
+        return HttpClientFactory.createClient(
+                config.getHttpCredentials(), config.getGerritProxy());
     }
 
     /**
