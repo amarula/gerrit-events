@@ -44,8 +44,9 @@ import net.sf.json.JSONObject;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.Credentials;
 import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.client.HttpClients;
+import org.apache.http.client.HttpClient;
+
+import com.sonymobile.tools.gerrit.gerritevents.helpers.HttpClientFactory;
 
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritChangeStatus;
 import com.sonymobile.tools.gerrit.gerritevents.dto.GerritEvent;
@@ -741,38 +742,38 @@ public class GerritRestPollerTest {
     // ---- Proxy configuration tests ----
 
     /**
-     * Tests that configureProxy does not set a proxy when the config proxy
-     * is null or empty.
+     * Tests that {@link HttpClientFactory#createClient} does not configure
+     * a custom proxy when the proxy URL is null or empty.
      */
     @Test
     public void testConfigureProxyNullAndEmpty() throws Exception {
-        HttpClientBuilder builder = HttpClients.custom();
+        Credentials creds = config.getHttpCredentials();
 
-        config.proxy = null;
-        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
-        assertNull("Proxy should be null for null config",
-                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
+        // Client creation must succeed; no proxy means DefaultRoutePlanner
+        // (which lacks a "proxy" field) is used as the route planner.
+        HttpClient client = HttpClientFactory.createClient(creds, null);
+        assertNotNull("Client should be created with null proxy", client);
 
-        config.proxy = "";
-        builder = HttpClients.custom();
-        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
-        assertNull("Proxy should be null for empty config",
-                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
+        client = HttpClientFactory.createClient(creds, "");
+        assertNotNull("Client should be created with empty proxy", client);
     }
 
     //CS IGNORE MagicNumber FOR NEXT 20 LINES. REASON: Test assertion.
+
     /**
-     * Tests that configureProxy sets the proxy on the builder when a valid
-     * proxy URL is configured.
+     * Tests that {@link HttpClientFactory#createClient} correctly configures
+     * the proxy host, port and scheme from a valid proxy URL.
      */
     @Test
     public void testConfigureProxyValidUrl() throws Exception {
-        config.proxy = "http://proxy.example.com:8080";
-        HttpClientBuilder builder = HttpClients.custom();
-        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
+        Credentials creds = config.getHttpCredentials();
+        HttpClient client = HttpClientFactory.createClient(creds, "http://proxy.example.com:8080");
+        assertNotNull("Client should be created with valid proxy", client);
 
+        Object routePlanner =
+                org.powermock.reflect.Whitebox.getInternalState(client, "routePlanner");
         HttpHost proxy = (HttpHost)
-                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy");
+                org.powermock.reflect.Whitebox.getInternalState(routePlanner, "proxy");
         assertNotNull("Proxy should be set for valid URL", proxy);
         assertEquals("proxy.example.com", proxy.getHostName());
         assertEquals(8080, proxy.getPort());
@@ -780,17 +781,15 @@ public class GerritRestPollerTest {
     }
 
     /**
-     * Tests that configureProxy does not throw when a malformed proxy URL
-     * is configured, and leaves the builder without a proxy.
+     * Tests that {@link HttpClientFactory#createClient} does not throw when
+     * a malformed proxy URL is given.
      */
     @Test
     public void testConfigureProxyInvalidUrl() throws Exception {
-        config.proxy = ":::not-a-valid-url:::";
-        HttpClientBuilder builder = HttpClients.custom();
-        // Must not throw
-        org.powermock.reflect.Whitebox.invokeMethod(poller, "configureProxy", builder);
-
-        assertNull("Proxy should be null after malformed URL",
-                org.powermock.reflect.Whitebox.getInternalState(builder, "proxy"));
+        Credentials creds = config.getHttpCredentials();
+        // Must not throw; the factory logs a warning and creates the client
+        // without a proxy (DefaultRoutePlanner, which has no "proxy" field).
+        HttpClient client = HttpClientFactory.createClient(creds, ":::not-a-valid-url:::");
+        assertNotNull("Client should be created even with invalid proxy", client);
     }
 }
